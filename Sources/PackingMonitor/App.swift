@@ -8,7 +8,8 @@ struct PackingMonitorApp {
         let host = environment["PACKING_MONITOR_HOST"] ?? "127.0.0.1"
         let port = Int(environment["PACKING_MONITOR_PORT"] ?? "8787") ?? 8787
         let startedAt = Date()
-        let serviceVersion = "0.1.0"
+        let serviceVersion = "0.2.0"
+        let captureService = CameraCaptureService()
 
         let router = Router()
 
@@ -59,6 +60,47 @@ struct PackingMonitorApp {
             return CameraAuthorizationResponse(
                 granted: granted,
                 status: CameraCatalog.permissionStatus()
+            )
+        }
+
+        router.get("/api/camera/capture-status") { _, _ -> CameraCaptureStatusResponse in
+            captureService.status()
+        }
+
+        router.post("/api/camera/start") { _, _ -> CameraCaptureActionResponse in
+            do {
+                try await captureService.startPreferredCamera()
+                return CameraCaptureActionResponse(
+                    ok: true,
+                    error: nil,
+                    capture: captureService.status()
+                )
+            } catch {
+                return CameraCaptureActionResponse(
+                    ok: false,
+                    error: error.localizedDescription,
+                    capture: captureService.status()
+                )
+            }
+        }
+
+        router.post("/api/camera/stop") { _, _ -> CameraCaptureActionResponse in
+            await captureService.stop()
+            return CameraCaptureActionResponse(
+                ok: true,
+                error: nil,
+                capture: captureService.status()
+            )
+        }
+
+        router.get("/api/camera/frame.jpg") { _, _ -> Response in
+            guard let jpeg = captureService.previewJPEG() else {
+                return Response(status: .noContent)
+            }
+            return Response(
+                status: .ok,
+                headers: [.contentType: "image/jpeg"],
+                body: .init(byteBuffer: ByteBuffer(bytes: jpeg))
             )
         }
 
