@@ -26,6 +26,22 @@ struct CameraAuthorizationResponse: ResponseEncodable {
     let status: String
 }
 
+struct CameraCaptureStatusResponse: ResponseEncodable, Sendable {
+    let running: Bool
+    let deviceID: String?
+    let deviceName: String?
+    let capturedWidth: Int32
+    let capturedHeight: Int32
+    let lastFrameAt: Date?
+    let previewAvailable: Bool
+}
+
+struct CameraCaptureActionResponse: ResponseEncodable, Sendable {
+    let ok: Bool
+    let error: String?
+    let capture: CameraCaptureStatusResponse
+}
+
 struct CameraInfo: Codable, Sendable {
     let id: String
     let name: String
