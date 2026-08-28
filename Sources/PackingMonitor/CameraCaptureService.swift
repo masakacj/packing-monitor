@@ -30,6 +30,7 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
     /// 2 FPS is enough for camera alignment / ROI setup and avoids wasting CPU
     /// on a browser preview while the native recording path stays full rate.
     private let previewInterval: TimeInterval = 0.5
+    private let previewMaxWidth: CGFloat = 960
 
     func startPreferredCamera() async throws {
         guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
@@ -41,7 +42,9 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
             throw CameraCaptureError.noVideoDevice
         }
 
-        try await start(device: device)
+        // Only move the stable identifier across the DispatchQueue boundary.
+        // AVCaptureDevice itself is not Sendable under Swift 6.
+        try await start(deviceID: device.uniqueID)
     }
 
     func stop() async {
@@ -99,9 +102,14 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
         return data
     }
 
-    private func start(device: AVCaptureDevice) async throws {
+    private func start(deviceID: String) async throws {
         try await withCheckedThrowingContinuation { continuation in
             sessionQueue.async { [self] in
+                guard let device = AVCaptureDevice(uniqueID: deviceID) else {
+                    continuation.resume(throwing: CameraCaptureError.noVideoDevice)
+                    return
+                }
+
                 if session.isRunning {
                     session.stopRunning()
                 }
@@ -130,8 +138,8 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
 
                     let output = AVCaptureVideoDataOutput()
                     output.alwaysDiscardsLateVideoFrames = true
-                    // Do not force BGRA. Apple recommends allowing a native pixel
-                    // format when possible to avoid an unnecessary conversion.
+                    // Do not force BGRA. Keeping a native camera pixel format avoids
+                    // an unnecessary full-frame conversion on the capture path.
                     output.setSampleBufferDelegate(self, queue: sampleQueue)
                     guard session.canAddOutput(output) else {
                         throw CameraCaptureError.cannotAddOutput
@@ -209,11 +217,19 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
 
         guard shouldEncodePreview else { return }
 
-        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        // The browser is a diagnostics surface, not the recording path. Keep its
+        // JPEG small even if the camera is delivering 1080p/4K frames.
+        let sourceImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let width = max(sourceImage.extent.width, 1)
+        let scale = min(1, previewMaxWidth / width)
+        let previewImage = scale < 1
+            ? sourceImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            : sourceImage
+
         guard let jpeg = ciContext.jpegRepresentation(
-            of: image,
+            of: previewImage,
             colorSpace: previewColorSpace,
-            options: [.lossyCompressionQuality: 0.72]
+            options: [:]
         ) else {
             return
         }
