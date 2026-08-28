@@ -103,7 +103,7 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
     }
 
     private func start(deviceID: String) async throws {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             sessionQueue.async { [self] in
                 guard let device = AVCaptureDevice(uniqueID: deviceID) else {
                     continuation.resume(throwing: CameraCaptureError.noVideoDevice)
@@ -161,7 +161,7 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
                     lastPreviewEncodedAt = 0
                     stateLock.unlock()
 
-                    continuation.resume()
+                    continuation.resume(returning: ())
                 } catch {
                     session.commitConfiguration()
                     stateLock.lock()
