@@ -18,6 +18,7 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
     private let previewColorSpace = CGColorSpaceCreateDeviceRGB()
 
     private var videoOutput: AVCaptureVideoDataOutput?
+    private var runningState = false
     private var activeDeviceID: String?
     private var activeDeviceName: String?
     private var latestPreviewJPEG: Data?
@@ -61,6 +62,7 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
                 videoOutput = nil
 
                 stateLock.lock()
+                runningState = false
                 activeDeviceID = nil
                 activeDeviceName = nil
                 latestPreviewJPEG = nil
@@ -78,7 +80,7 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
     func status() -> CameraCaptureStatusResponse {
         stateLock.lock()
         let response = CameraCaptureStatusResponse(
-            running: session.isRunning,
+            running: runningState,
             deviceID: activeDeviceID,
             deviceName: activeDeviceName,
             capturedWidth: capturedWidth,
@@ -100,14 +102,12 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
     private func start(device: AVCaptureDevice) async throws {
         try await withCheckedThrowingContinuation { continuation in
             sessionQueue.async { [self] in
+                if session.isRunning {
+                    session.stopRunning()
+                }
+
+                session.beginConfiguration()
                 do {
-                    if session.isRunning {
-                        session.stopRunning()
-                    }
-
-                    session.beginConfiguration()
-                    defer { session.commitConfiguration() }
-
                     for input in session.inputs {
                         session.removeInput(input)
                     }
@@ -139,7 +139,11 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
                     session.addOutput(output)
                     videoOutput = output
 
+                    session.commitConfiguration()
+                    session.startRunning()
+
                     stateLock.lock()
+                    runningState = session.isRunning
                     activeDeviceID = device.uniqueID
                     activeDeviceName = device.localizedName
                     latestPreviewJPEG = nil
@@ -149,14 +153,12 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
                     lastPreviewEncodedAt = 0
                     stateLock.unlock()
 
-                    // Commit before startRunning; defer above performs the commit.
-                    // We manually commit now and begin a no-op config so defer stays
-                    // balanced in the success path.
-                    session.commitConfiguration()
-                    session.beginConfiguration()
-                    session.startRunning()
                     continuation.resume()
                 } catch {
+                    session.commitConfiguration()
+                    stateLock.lock()
+                    runningState = false
+                    stateLock.unlock()
                     continuation.resume(throwing: error)
                 }
             }
@@ -184,9 +186,14 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard
+            let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+            let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer)
+        else {
+            return
+        }
 
-        let dimensions = CMVideoFormatDescriptionGetDimensions(CMSampleBufferGetFormatDescription(sampleBuffer)!)
+        let dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription)
         let now = Date()
         let uptime = ProcessInfo.processInfo.systemUptime
 
