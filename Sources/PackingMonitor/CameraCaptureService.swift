@@ -45,6 +45,14 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
         start(deviceID: device.uniqueID, completion: completion)
     }
 
+    func start(deviceID: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
+            completion(.failure(CameraCaptureError.permissionRequired))
+            return
+        }
+        configureAndStart(deviceID: deviceID, completion: completion)
+    }
+
     func stop(completion: (() -> Void)? = nil) {
         sessionQueue.async { [weak self] in
             guard let self = self else {
@@ -103,7 +111,7 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
         return data
     }
 
-    private func start(deviceID: String, completion: @escaping (Result<Void, Error>) -> Void) {
+    private func configureAndStart(deviceID: String, completion: @escaping (Result<Void, Error>) -> Void) {
         sessionQueue.async { [weak self] in
             guard let self = self else {
                 completion(.failure(CameraCaptureError.noVideoDevice))
@@ -174,15 +182,34 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
     }
 
     private func preferredDevice(from devices: [AVCaptureDevice]) -> AVCaptureDevice? {
+        // Prefer USB/HDMI capture devices for packing-monitor use. Virtual
+        // webcam drivers such as FUJIFILM X Webcam can remain installed but
+        // should not beat a real capture card when no saved selection exists.
+        if let capture = devices.first(where: { device in
+            let haystack = "\(device.localizedName) \(device.manufacturer) \(device.modelID)".lowercased()
+            let looksLikeCapture = haystack.contains("capture") ||
+                haystack.contains("uvc") ||
+                haystack.contains("hdmi") ||
+                haystack.contains("usb3") ||
+                haystack.contains("usb 3")
+            let isFujiVirtual = haystack.contains("x webcam") || haystack.contains("fujifilm x webcam")
+            return looksLikeCapture && !isFujiVirtual
+        }) {
+            return capture
+        }
+
+        if let external = devices.first(where: { device in
+            let haystack = "\(device.localizedName) \(device.manufacturer) \(device.modelID)".lowercased()
+            return device.position == .unspecified && !haystack.contains("x webcam")
+        }) {
+            return external
+        }
+
         if let fuji = devices.first(where: { device in
             let haystack = "\(device.localizedName) \(device.manufacturer) \(device.modelID)".lowercased()
             return haystack.contains("fujifilm") || haystack.contains("fuji") || haystack.contains("x-t2")
         }) {
             return fuji
-        }
-
-        if let external = devices.first(where: { $0.position == .unspecified }) {
-            return external
         }
 
         return devices.first
