@@ -24,7 +24,7 @@ The browser is a control/query surface only. Camera capture, recording and recog
 
 The first vertical slice now provides:
 
-- Hummingbird-based local HTTP service
+- dependency-free local HTTP service built on Apple's Network.framework
 - macOS camera permission diagnostics
 - AVFoundation video-device discovery
 - camera capability summary (max resolution / FPS / format count)
@@ -34,14 +34,17 @@ The first vertical slice now provides:
 - minimal Web dashboard
 - no-Dock `.app` development bundle packaging
 - macOS CI build + bundle validation
+- macOS Catalina 10.15 deployment target
 
 Recording, SQLite indexing and shipping-label recognition are the next milestones after the real X-T2 input path is verified.
 
 ## Requirements
 
-- macOS 14+
-- Swift 6.1+
-- A camera visible to AVFoundation (FUJIFILM X Webcam, USB/UVC camera, HDMI capture card, etc.)
+- **macOS 10.15 Catalina or later**
+- Swift 5.3+ / Xcode 12.x+ on Catalina
+- A camera visible to AVFoundation (USB/UVC camera, HDMI capture card, supported virtual camera, etc.)
+
+The package intentionally avoids Swift Concurrency and modern server dependencies so the current diagnostic build remains compatible with the Swift toolchain available on Catalina.
 
 Camera permission requires an app bundle containing `NSCameraUsageDescription`, so use the packaged development app below when testing capture. Plain `swift run PackingMonitor` is still useful for API/device-enumeration development, but intentionally refuses to request camera access when that bundle metadata is absent.
 
@@ -63,7 +66,7 @@ http://127.0.0.1:8787
 In the dashboard:
 
 1. Click **请求摄像头权限** and approve the macOS camera prompt.
-2. Confirm the X-T2 / FUJIFILM device appears in **视频输入设备**.
+2. Confirm the X-T2 / HDMI capture card / UVC device appears in **视频输入设备**.
 3. Click **启动预览**.
 4. Check **Actual frame** for the real resolution delivered to AVFoundation and confirm the browser preview shows the packing table clearly.
 
@@ -91,7 +94,7 @@ Keep the host on `127.0.0.1` during development. LAN access and authentication w
 
 ## Roadmap
 
-1. **P0 — Camera diagnostics**: verify X-T2 discovery, USB feed resolution/FPS and stability. **In progress.**
+1. **P0 — Camera diagnostics**: verify X-T2/HDMI/UVC discovery, feed resolution/FPS and stability. **In progress.**
 2. **P1 — Recorder**: native H.264 continuous recording, 5-minute segmentation, disk policy.
 3. **P2 — Index database**: SQLite video segments and tracking events.
 4. **P3 — Recognition**: Vision barcode first, OCR fallback, ROI and multi-frame stabilization.
