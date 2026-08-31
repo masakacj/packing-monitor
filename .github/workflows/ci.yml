@@ -12,10 +12,14 @@ concurrency:
 jobs:
   build:
     runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "10.15"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Toolchain
         run: swift --version
-      - name: Build and package
+      - name: Build and package for Catalina deployment target
         run: bash scripts/build-app.sh debug
+      - name: Verify minimum macOS target
+        run: otool -l .build/app/PackingMonitor.app/Contents/MacOS/PackingMonitor | grep -A3 LC_BUILD_VERSION
