@@ -14,12 +14,23 @@ jobs:
     runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "10.15"
+      PACKING_MONITOR_ARCH: "x86_64"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Toolchain
         run: swift --version
-      - name: Build and package for Catalina deployment target
+      - name: Build and package Intel app for Catalina
         run: bash scripts/build-app.sh debug
+      - name: Verify Intel architecture
+        run: |
+          BIN=.build/app/PackingMonitor.app/Contents/MacOS/PackingMonitor
+          file "$BIN"
+          file "$BIN" | grep -q "x86_64"
       - name: Verify minimum macOS target
-        run: otool -l .build/app/PackingMonitor.app/Contents/MacOS/PackingMonitor | grep -A3 LC_BUILD_VERSION
+        run: |
+          BIN=.build/app/PackingMonitor.app/Contents/MacOS/PackingMonitor
+          otool -l "$BIN" | grep -A5 LC_BUILD_VERSION
+          MIN_OS=$(otool -l "$BIN" | awk '/LC_BUILD_VERSION/{seen=1; next} seen && /minos/{print $2; exit}')
+          echo "Minimum macOS: $MIN_OS"
+          test "$MIN_OS" = "10.15"
