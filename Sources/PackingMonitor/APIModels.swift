@@ -13,6 +13,7 @@ struct ServiceStatusResponse: Codable {
     let uptimeSeconds: Double
     let cameraPermission: String
     let cameraCount: Int
+    let preferredCameraID: String?
 }
 
 struct CameraListResponse: Codable {
