@@ -4,6 +4,7 @@ import Network
 struct HTTPRequest {
     let method: String
     let path: String
+    let query: [String: String]
 }
 
 struct HTTPResponse {
@@ -131,9 +132,16 @@ final class HTTPServer {
         }
 
         let method = String(parts[0]).uppercased()
-        let rawPath = String(parts[1])
-        let path = rawPath.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? rawPath
-        let request = HTTPRequest(method: method, path: path)
+        let rawTarget = String(parts[1])
+        let components = URLComponents(string: rawTarget)
+        let path = components?.path.isEmpty == false ? (components?.path ?? rawTarget) : rawTarget
+        var query: [String: String] = [:]
+        for item in components?.queryItems ?? [] {
+            if let value = item.value {
+                query[item.name] = value
+            }
+        }
+        let request = HTTPRequest(method: method, path: path, query: query)
 
         handler(request) { [weak self, weak connection] response in
             guard let self = self, let connection = connection else { return }
