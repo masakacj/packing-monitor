@@ -1,13 +1,12 @@
 import Foundation
-import Hummingbird
 
-struct HealthResponse: ResponseEncodable {
+struct HealthResponse: Codable {
     let ok: Bool
     let service: String
     let time: Date
 }
 
-struct ServiceStatusResponse: ResponseEncodable {
+struct ServiceStatusResponse: Codable {
     let service: String
     let version: String
     let startedAt: Date
@@ -16,17 +15,17 @@ struct ServiceStatusResponse: ResponseEncodable {
     let cameraCount: Int
 }
 
-struct CameraListResponse: ResponseEncodable {
+struct CameraListResponse: Codable {
     let permission: String
     let cameras: [CameraInfo]
 }
 
-struct CameraAuthorizationResponse: ResponseEncodable {
+struct CameraAuthorizationResponse: Codable {
     let granted: Bool
     let status: String
 }
 
-struct CameraCaptureStatusResponse: ResponseEncodable, Sendable {
+struct CameraCaptureStatusResponse: Codable {
     let running: Bool
     let deviceID: String?
     let deviceName: String?
@@ -36,13 +35,13 @@ struct CameraCaptureStatusResponse: ResponseEncodable, Sendable {
     let previewAvailable: Bool
 }
 
-struct CameraCaptureActionResponse: ResponseEncodable, Sendable {
+struct CameraCaptureActionResponse: Codable {
     let ok: Bool
     let error: String?
     let capture: CameraCaptureStatusResponse
 }
 
-struct CameraInfo: Codable, Sendable {
+struct CameraInfo: Codable {
     let id: String
     let name: String
     let manufacturer: String
@@ -56,5 +55,3 @@ struct CameraInfo: Codable, Sendable {
     let maxHeight: Int32
     let maxFPS: Double
 }
-
-extension CameraInfo: ResponseEncodable {}
