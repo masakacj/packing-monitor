@@ -5,11 +5,9 @@ import Foundation
 
 /// Owns the live AVFoundation capture session.
 ///
-/// The service keeps capture native on macOS and only emits a throttled JPEG
-/// preview for the browser. Recording and Vision processing will consume the
-/// same sample-buffer stream in later milestones without routing the original
-/// video through the browser.
-final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
+/// This implementation intentionally avoids Swift concurrency so it can be
+/// built with the Swift toolchain available on macOS Catalina/Xcode 12.
+final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     private let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "packing-monitor.capture.session")
     private let sampleQueue = DispatchQueue(label: "packing-monitor.capture.samples")
@@ -32,51 +30,54 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
     private let previewInterval: TimeInterval = 0.5
     private let previewMaxWidth: CGFloat = 960
 
-    func startPreferredCamera() async throws {
+    func startPreferredCamera(completion: @escaping (Result<Void, Error>) -> Void) {
         guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
-            throw CameraCaptureError.permissionRequired
+            completion(.failure(CameraCaptureError.permissionRequired))
+            return
         }
 
         let devices = AVCaptureDevice.devices(for: .video)
         guard let device = preferredDevice(from: devices) else {
-            throw CameraCaptureError.noVideoDevice
+            completion(.failure(CameraCaptureError.noVideoDevice))
+            return
         }
 
-        // Only move the stable identifier across the DispatchQueue boundary.
-        // AVCaptureDevice itself is not Sendable under Swift 6.
-        try await start(deviceID: device.uniqueID)
+        start(deviceID: device.uniqueID, completion: completion)
     }
 
-    func stop() async {
-        await withCheckedContinuation { continuation in
-            sessionQueue.async { [self] in
-                if session.isRunning {
-                    session.stopRunning()
-                }
-
-                session.beginConfiguration()
-                for input in session.inputs {
-                    session.removeInput(input)
-                }
-                for output in session.outputs {
-                    session.removeOutput(output)
-                }
-                session.commitConfiguration()
-                videoOutput = nil
-
-                stateLock.lock()
-                runningState = false
-                activeDeviceID = nil
-                activeDeviceName = nil
-                latestPreviewJPEG = nil
-                capturedWidth = 0
-                capturedHeight = 0
-                lastFrameAt = nil
-                lastPreviewEncodedAt = 0
-                stateLock.unlock()
-
-                continuation.resume()
+    func stop(completion: (() -> Void)? = nil) {
+        sessionQueue.async { [weak self] in
+            guard let self = self else {
+                completion?()
+                return
             }
+
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
+
+            self.session.beginConfiguration()
+            for input in self.session.inputs {
+                self.session.removeInput(input)
+            }
+            for output in self.session.outputs {
+                self.session.removeOutput(output)
+            }
+            self.session.commitConfiguration()
+            self.videoOutput = nil
+
+            self.stateLock.lock()
+            self.runningState = false
+            self.activeDeviceID = nil
+            self.activeDeviceName = nil
+            self.latestPreviewJPEG = nil
+            self.capturedWidth = 0
+            self.capturedHeight = 0
+            self.lastFrameAt = nil
+            self.lastPreviewEncodedAt = 0
+            self.stateLock.unlock()
+
+            completion?()
         }
     }
 
@@ -102,73 +103,72 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
         return data
     }
 
-    private func start(deviceID: String) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sessionQueue.async { [self] in
-                guard let device = AVCaptureDevice(uniqueID: deviceID) else {
-                    continuation.resume(throwing: CameraCaptureError.noVideoDevice)
-                    return
+    private func start(deviceID: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        sessionQueue.async { [weak self] in
+            guard let self = self else {
+                completion(.failure(CameraCaptureError.noVideoDevice))
+                return
+            }
+
+            let devices = AVCaptureDevice.devices(for: .video)
+            guard let device = devices.first(where: { $0.uniqueID == deviceID }) else {
+                completion(.failure(CameraCaptureError.noVideoDevice))
+                return
+            }
+
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
+
+            self.session.beginConfiguration()
+            do {
+                for input in self.session.inputs {
+                    self.session.removeInput(input)
+                }
+                for output in self.session.outputs {
+                    self.session.removeOutput(output)
                 }
 
-                if session.isRunning {
-                    session.stopRunning()
+                if self.session.canSetSessionPreset(.high) {
+                    self.session.sessionPreset = .high
                 }
 
-                session.beginConfiguration()
-                do {
-                    for input in session.inputs {
-                        session.removeInput(input)
-                    }
-                    for output in session.outputs {
-                        session.removeOutput(output)
-                    }
-
-                    // Prefer the highest practical preset the selected camera can
-                    // deliver. The actual received frame dimensions are measured
-                    // from CMSampleBuffer and exposed by the diagnostics API.
-                    if session.canSetSessionPreset(.high) {
-                        session.sessionPreset = .high
-                    }
-
-                    let input = try AVCaptureDeviceInput(device: device)
-                    guard session.canAddInput(input) else {
-                        throw CameraCaptureError.cannotAddInput
-                    }
-                    session.addInput(input)
-
-                    let output = AVCaptureVideoDataOutput()
-                    output.alwaysDiscardsLateVideoFrames = true
-                    // Do not force BGRA. Keeping a native camera pixel format avoids
-                    // an unnecessary full-frame conversion on the capture path.
-                    output.setSampleBufferDelegate(self, queue: sampleQueue)
-                    guard session.canAddOutput(output) else {
-                        throw CameraCaptureError.cannotAddOutput
-                    }
-                    session.addOutput(output)
-                    videoOutput = output
-
-                    session.commitConfiguration()
-                    session.startRunning()
-
-                    stateLock.lock()
-                    runningState = session.isRunning
-                    activeDeviceID = device.uniqueID
-                    activeDeviceName = device.localizedName
-                    latestPreviewJPEG = nil
-                    capturedWidth = 0
-                    capturedHeight = 0
-                    lastFrameAt = nil
-                    lastPreviewEncodedAt = 0
-                    stateLock.unlock()
-
-                    continuation.resume(returning: ())
-                } catch {
-                    session.commitConfiguration()
-                    stateLock.lock()
-                    runningState = false
-                    stateLock.unlock()
-                    continuation.resume(throwing: error)
+                let input = try AVCaptureDeviceInput(device: device)
+                guard self.session.canAddInput(input) else {
+                    throw CameraCaptureError.cannotAddInput
                 }
+                self.session.addInput(input)
+
+                let output = AVCaptureVideoDataOutput()
+                output.alwaysDiscardsLateVideoFrames = true
+                output.setSampleBufferDelegate(self, queue: self.sampleQueue)
+                guard self.session.canAddOutput(output) else {
+                    throw CameraCaptureError.cannotAddOutput
+                }
+                self.session.addOutput(output)
+                self.videoOutput = output
+
+                self.session.commitConfiguration()
+                self.session.startRunning()
+
+                self.stateLock.lock()
+                self.runningState = self.session.isRunning
+                self.activeDeviceID = device.uniqueID
+                self.activeDeviceName = device.localizedName
+                self.latestPreviewJPEG = nil
+                self.capturedWidth = 0
+                self.capturedHeight = 0
+                self.lastFrameAt = nil
+                self.lastPreviewEncodedAt = 0
+                self.stateLock.unlock()
+
+                completion(.success(()))
+            } catch {
+                self.session.commitConfiguration()
+                self.stateLock.lock()
+                self.runningState = false
+                self.stateLock.unlock()
+                completion(.failure(error))
             }
         }
     }
@@ -181,7 +181,6 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
             return fuji
         }
 
-        // External / virtual capture devices normally have an unspecified position.
         if let external = devices.first(where: { $0.position == .unspecified }) {
             return external
         }
@@ -217,8 +216,6 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
 
         guard shouldEncodePreview else { return }
 
-        // The browser is a diagnostics surface, not the recording path. Keep its
-        // JPEG small even if the camera is delivering 1080p/4K frames.
         let sourceImage = CIImage(cvPixelBuffer: pixelBuffer)
         let width = max(sourceImage.extent.width, 1)
         let scale = min(1, previewMaxWidth / width)
