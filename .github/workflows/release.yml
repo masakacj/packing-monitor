@@ -1,0 +1,85 @@
+name: macOS Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional release tag; leave empty for an automatic build tag"
+        required: false
+        type: string
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release]')
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "10.15"
+      PACKING_MONITOR_ARCH: "x86_64"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Catalina Intel app
+        run: bash scripts/build-app.sh release
+
+      - name: Verify compatibility
+        run: |
+          BIN=.build/app/PackingMonitor.app/Contents/MacOS/PackingMonitor
+          file "$BIN"
+          file "$BIN" | grep -q "x86_64"
+          MIN_OS=$(otool -l "$BIN" | awk '/LC_BUILD_VERSION/{seen=1; next} seen && /minos/{print $2; exit}')
+          echo "Minimum macOS: $MIN_OS"
+          test "$MIN_OS" = "10.15"
+          codesign --verify --deep --strict .build/app/PackingMonitor.app
+
+      - name: Package app
+        run: |
+          mkdir -p dist
+          ARCHIVE="dist/PackingMonitor-macOS-10.15-x86_64.zip"
+          ditto -c -k --sequesterRsrc --keepParent .build/app/PackingMonitor.app "$ARCHIVE"
+          shasum -a 256 "$ARCHIVE" | tee dist/SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Support/Info.plist)
+          TAG="$REQUESTED_TAG"
+          if [[ -z "$TAG" ]]; then
+            TAG="v${VERSION}-build.${GITHUB_RUN_NUMBER}"
+          fi
+
+          CHECKSUM=$(cat dist/SHA256SUMS.txt)
+          cat > dist/release-notes.md <<EOF
+          Packing Monitor macOS build.
+
+          Compatibility: macOS 10.15 Catalina or newer, Intel x86_64.
+          Signing: ad-hoc signed for personal installation.
+          Commit: ${GITHUB_SHA}
+
+          SHA-256:
+          ${CHECKSUM}
+
+          If macOS blocks the app after download, remove the quarantine attribute:
+          xattr -dr com.apple.quarantine /Applications/PackingMonitor.app
+          EOF
+
+          ARCHIVE="dist/PackingMonitor-macOS-10.15-x86_64.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ARCHIVE" dist/SHA256SUMS.txt --clobber
+          else
+            gh release create "$TAG" "$ARCHIVE" dist/SHA256SUMS.txt \
+              --target "$GITHUB_SHA" \
+              --title "Packing Monitor ${TAG}" \
+              --notes-file dist/release-notes.md
+          fi
