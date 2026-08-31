@@ -19,10 +19,12 @@ enum Dashboard {
         .label { color:#9297a2; font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
         .value { margin-top:7px; font-size:18px; font-weight:650; word-break:break-word; }
         .ok { color:#62d38b; } .warn { color:#f7c65c; } .bad { color:#ff6b72; }
-        button { appearance:none; border:1px solid #343845; background:#20232b; color:#fff; border-radius:9px; padding:9px 12px; cursor:pointer; }
+        button, select { border:1px solid #343845; background:#20232b; color:#fff; border-radius:9px; }
+        button { appearance:none; padding:9px 12px; cursor:pointer; }
         button:hover { background:#292d37; }
+        select { width:100%; margin-top:9px; padding:9px 10px; font-size:14px; }
         section { margin-top:24px; }
-        .preview-layout { display:grid; grid-template-columns:minmax(0, 2fr) minmax(240px, 1fr); gap:14px; }
+        .preview-layout { display:grid; grid-template-columns:minmax(0, 2fr) minmax(260px, 1fr); gap:14px; }
         .preview-box { min-height:320px; border:1px solid #252832; border-radius:14px; background:#050608; display:flex; align-items:center; justify-content:center; overflow:hidden; }
         .preview-box img { display:none; width:100%; height:auto; max-height:620px; object-fit:contain; }
         .preview-placeholder { color:#737985; text-align:center; padding:24px; }
@@ -63,17 +65,22 @@ enum Dashboard {
           <div class="preview-layout">
             <div class="preview-box">
               <img id="preview" alt="Camera preview">
-              <div id="preview-placeholder" class="preview-placeholder">授权摄像头后点击“启动预览”</div>
+              <div id="preview-placeholder" class="preview-placeholder">授权摄像头后选择视频源并点击“启动预览”</div>
             </div>
             <div class="capture-meta">
+              <div class="card">
+                <div class="label">Video source</div>
+                <select id="camera-select"><option value="">正在读取视频设备…</option></select>
+                <div class="muted" id="camera-select-detail" style="margin-top:8px">—</div>
+              </div>
               <div class="card"><div class="label">Capture</div><div class="value" id="capture-state">Stopped</div></div>
-              <div class="card"><div class="label">Device</div><div class="value" id="capture-device">—</div></div>
+              <div class="card"><div class="label">Active device</div><div class="value" id="capture-device">—</div></div>
               <div class="card"><div class="label">Actual frame</div><div class="value" id="capture-size">—</div></div>
               <div class="actions">
                 <button id="start-capture">启动预览</button>
                 <button id="stop-capture">停止</button>
               </div>
-              <div class="muted">网页只拉取约 2 FPS JPEG 诊断预览；后续录像不会经过浏览器。</div>
+              <div class="muted">选择会在启动成功后保存。建议 X-T2 HDMI 采集卡选择 USB3.0 capture；网页只拉取约 2 FPS JPEG 诊断预览。</div>
             </div>
           </div>
         </section>
@@ -91,6 +98,9 @@ enum Dashboard {
       <script>
         const $ = (id) => document.getElementById(id);
         let captureRunning = false;
+        let selectedCameraID = null;
+        let camerasCache = [];
+
         const permissionClass = (v) => v === 'authorized' ? 'ok' : (v === 'denied' || v === 'restricted' ? 'bad' : 'warn');
         const fmtUptime = (s) => {
           s = Math.max(0, Math.floor(s || 0));
@@ -99,13 +109,65 @@ enum Dashboard {
         };
         const escapeHtml = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 
+        function defaultCameraID(cameras) {
+          if (!cameras.length) return null;
+          const score = (c) => {
+            const text = `${c.name || ''} ${c.manufacturer || ''} ${c.modelID || ''}`.toLowerCase();
+            let value = 0;
+            if (text.includes('capture') || text.includes('uvc') || text.includes('hdmi') || text.includes('usb3') || text.includes('usb 3')) value += 100;
+            if (String(c.position) === 'unspecified') value += 20;
+            if (text.includes('x webcam')) value -= 100;
+            if (text.includes('facetime')) value -= 30;
+            value += Math.min(20, ((c.maxWidth || 0) * (c.maxHeight || 0)) / 1000000);
+            return value;
+          };
+          return [...cameras].sort((a, b) => score(b) - score(a))[0].id;
+        }
+
+        function updateCameraDetail() {
+          const camera = camerasCache.find(c => c.id === selectedCameraID);
+          $('camera-select-detail').textContent = camera
+            ? `${camera.maxWidth || 0} × ${camera.maxHeight || 0} · max ${Number(camera.maxFPS || 0).toFixed(0)} FPS`
+            : '—';
+        }
+
+        function renderCameraSelector(cameras, status, capture) {
+          camerasCache = cameras;
+          const available = new Set(cameras.map(c => c.id));
+          if (!selectedCameraID || !available.has(selectedCameraID)) {
+            if (status.preferredCameraID && available.has(status.preferredCameraID)) {
+              selectedCameraID = status.preferredCameraID;
+            } else if (capture.deviceID && available.has(capture.deviceID)) {
+              selectedCameraID = capture.deviceID;
+            } else {
+              selectedCameraID = defaultCameraID(cameras);
+            }
+          }
+
+          const select = $('camera-select');
+          if (!cameras.length) {
+            select.innerHTML = '<option value="">未发现视频设备</option>';
+            select.disabled = true;
+            updateCameraDetail();
+            return;
+          }
+
+          select.disabled = false;
+          select.innerHTML = cameras.map(c => {
+            const size = c.maxWidth && c.maxHeight ? ` · ${c.maxWidth}×${c.maxHeight}` : '';
+            return `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}${size}</option>`;
+          }).join('');
+          if (selectedCameraID) select.value = selectedCameraID;
+          updateCameraDetail();
+        }
+
         function renderCapture(capture) {
           captureRunning = !!capture.running;
           $('capture-state').textContent = captureRunning ? 'Running' : 'Stopped';
           $('capture-state').className = `value ${captureRunning ? 'ok' : ''}`;
           $('capture-device').textContent = capture.deviceName || '—';
           $('capture-size').textContent = capture.capturedWidth && capture.capturedHeight
-            ? `${capture.capturedWidth} × ${capture.capturedHeight}` : '等待首帧…';
+            ? `${capture.capturedWidth} × ${capture.capturedHeight}` : (captureRunning ? '等待首帧…' : '—');
           if (!captureRunning) {
             $('preview').style.display = 'none';
             $('preview-placeholder').style.display = 'block';
@@ -118,6 +180,11 @@ enum Dashboard {
           img.onload = () => {
             img.style.display = 'block';
             $('preview-placeholder').style.display = 'none';
+          };
+          img.onerror = () => {
+            img.style.display = 'none';
+            $('preview-placeholder').style.display = 'block';
+            $('preview-placeholder').textContent = '正在等待视频帧…';
           };
           img.src = `/api/camera/frame.jpg?t=${Date.now()}`;
         }
@@ -136,6 +203,7 @@ enum Dashboard {
             $('camera-count').textContent = status.cameraCount;
             $('uptime').textContent = fmtUptime(status.uptimeSeconds);
             renderCapture(capture);
+            renderCameraSelector(data.cameras, status, capture);
 
             const body = $('camera-body');
             if (!data.cameras.length) {
@@ -163,16 +231,27 @@ enum Dashboard {
           renderCapture(data.capture);
           if (!data.ok) alert(data.error || '操作失败');
           await refresh();
+          refreshPreview();
         }
 
         $('refresh').addEventListener('click', refresh);
+        $('camera-select').addEventListener('change', (event) => {
+          selectedCameraID = event.target.value || null;
+          updateCameraDetail();
+        });
         $('authorize').addEventListener('click', async () => {
           const res = await fetch('/api/camera/authorize', { method: 'POST' });
           const data = await res.json();
           alert(data.granted ? '摄像头权限已授权' : `摄像头权限未授权：${data.status}`);
           await refresh();
         });
-        $('start-capture').addEventListener('click', () => captureAction('/api/camera/start'));
+        $('start-capture').addEventListener('click', () => {
+          if (!selectedCameraID) {
+            alert('请先选择视频源');
+            return;
+          }
+          captureAction(`/api/camera/start?deviceID=${encodeURIComponent(selectedCameraID)}`);
+        });
         $('stop-capture').addEventListener('click', () => captureAction('/api/camera/stop'));
         refresh();
         setInterval(refresh, 5000);
