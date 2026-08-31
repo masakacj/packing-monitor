@@ -8,6 +8,24 @@ let startedAt = Date()
 let serviceVersion = "0.3.0"
 let captureService = CameraCaptureService()
 
+func dashboardURL(host: String, port: Int) -> String {
+    let browserHost: String
+    switch host {
+    case "0.0.0.0", "::":
+        browserHost = "127.0.0.1"
+    default:
+        browserHost = host
+    }
+    return "http://\(browserHost):\(port)"
+}
+
+func openDashboard(_ url: String) {
+    let opener = Process()
+    opener.launchPath = "/usr/bin/open"
+    opener.arguments = [url]
+    opener.launch()
+}
+
 do {
     let server = try HTTPServer(host: host, port: port) { request, respond in
         switch (request.method, request.path) {
@@ -97,7 +115,13 @@ do {
     }
 
     server.start()
-    print("Packing Monitor \(serviceVersion) listening on http://\(host):\(port)")
+    let url = dashboardURL(host: host, port: port)
+    print("Packing Monitor \(serviceVersion) listening on \(url)")
+
+    DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+        openDashboard(url)
+    }
+
     dispatchMain()
 } catch {
     fputs("Packing Monitor failed to start: \(error)\n", stderr)
