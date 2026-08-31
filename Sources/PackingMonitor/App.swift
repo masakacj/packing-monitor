@@ -1,114 +1,105 @@
+import Dispatch
 import Foundation
-import Hummingbird
 
 @main
 struct PackingMonitorApp {
-    static func main() async throws {
+    static func main() throws {
         let environment = ProcessInfo.processInfo.environment
         let host = environment["PACKING_MONITOR_HOST"] ?? "127.0.0.1"
         let port = Int(environment["PACKING_MONITOR_PORT"] ?? "8787") ?? 8787
         let startedAt = Date()
-        let serviceVersion = "0.2.0"
+        let serviceVersion = "0.3.0"
         let captureService = CameraCaptureService()
 
-        let router = Router()
+        let server = try HTTPServer(host: host, port: port) { request, respond in
+            switch (request.method, request.path) {
+            case ("GET", "/"):
+                respond(.text(Dashboard.html, contentType: "text/html; charset=utf-8"))
 
-        router.get("/") { _, _ -> EditedResponse in
-            .init(
-                status: .ok,
-                headers: [.contentType: "text/html; charset=utf-8"],
-                response: Dashboard.html
-            )
-        }
-
-        router.get("/api/health") { _, _ -> HealthResponse in
-            HealthResponse(
-                ok: true,
-                service: "packing-monitor",
-                time: Date()
-            )
-        }
-
-        router.get("/api/status") { _, _ -> ServiceStatusResponse in
-            let cameras = CameraCatalog.videoDevices()
-            return ServiceStatusResponse(
-                service: "packing-monitor",
-                version: serviceVersion,
-                startedAt: startedAt,
-                uptimeSeconds: Date().timeIntervalSince(startedAt),
-                cameraPermission: CameraCatalog.permissionStatus(),
-                cameraCount: cameras.count
-            )
-        }
-
-        router.get("/api/cameras") { _, _ -> CameraListResponse in
-            CameraListResponse(
-                permission: CameraCatalog.permissionStatus(),
-                cameras: CameraCatalog.videoDevices()
-            )
-        }
-
-        router.post("/api/camera/authorize") { _, _ -> CameraAuthorizationResponse in
-            guard CameraCatalog.hasCameraUsageDescription else {
-                return CameraAuthorizationResponse(
-                    granted: false,
-                    status: "host_missing_camera_usage_description"
-                )
-            }
-
-            let granted = await CameraCatalog.requestPermission()
-            return CameraAuthorizationResponse(
-                granted: granted,
-                status: CameraCatalog.permissionStatus()
-            )
-        }
-
-        router.get("/api/camera/capture-status") { _, _ -> CameraCaptureStatusResponse in
-            captureService.status()
-        }
-
-        router.post("/api/camera/start") { _, _ -> CameraCaptureActionResponse in
-            do {
-                try await captureService.startPreferredCamera()
-                return CameraCaptureActionResponse(
+            case ("GET", "/api/health"):
+                respond(.json(HealthResponse(
                     ok: true,
-                    error: nil,
-                    capture: captureService.status()
-                )
-            } catch {
-                return CameraCaptureActionResponse(
-                    ok: false,
-                    error: error.localizedDescription,
-                    capture: captureService.status()
-                )
+                    service: "packing-monitor",
+                    time: Date()
+                )))
+
+            case ("GET", "/api/status"):
+                let cameras = CameraCatalog.videoDevices()
+                respond(.json(ServiceStatusResponse(
+                    service: "packing-monitor",
+                    version: serviceVersion,
+                    startedAt: startedAt,
+                    uptimeSeconds: Date().timeIntervalSince(startedAt),
+                    cameraPermission: CameraCatalog.permissionStatus(),
+                    cameraCount: cameras.count
+                )))
+
+            case ("GET", "/api/cameras"):
+                respond(.json(CameraListResponse(
+                    permission: CameraCatalog.permissionStatus(),
+                    cameras: CameraCatalog.videoDevices()
+                )))
+
+            case ("POST", "/api/camera/authorize"):
+                guard CameraCatalog.hasCameraUsageDescription else {
+                    respond(.json(CameraAuthorizationResponse(
+                        granted: false,
+                        status: "host_missing_camera_usage_description"
+                    )))
+                    return
+                }
+
+                CameraCatalog.requestPermission { granted in
+                    respond(.json(CameraAuthorizationResponse(
+                        granted: granted,
+                        status: CameraCatalog.permissionStatus()
+                    )))
+                }
+
+            case ("GET", "/api/camera/capture-status"):
+                respond(.json(captureService.status()))
+
+            case ("POST", "/api/camera/start"):
+                captureService.startPreferredCamera { result in
+                    switch result {
+                    case .success:
+                        respond(.json(CameraCaptureActionResponse(
+                            ok: true,
+                            error: nil,
+                            capture: captureService.status()
+                        )))
+                    case .failure(let error):
+                        respond(.json(CameraCaptureActionResponse(
+                            ok: false,
+                            error: error.localizedDescription,
+                            capture: captureService.status()
+                        )))
+                    }
+                }
+
+            case ("POST", "/api/camera/stop"):
+                captureService.stop {
+                    respond(.json(CameraCaptureActionResponse(
+                        ok: true,
+                        error: nil,
+                        capture: captureService.status()
+                    )))
+                }
+
+            case ("GET", "/api/camera/frame.jpg"):
+                guard let jpeg = captureService.previewJPEG() else {
+                    respond(.empty(statusCode: 204))
+                    return
+                }
+                respond(.data(jpeg, contentType: "image/jpeg"))
+
+            default:
+                respond(.text("Not Found", statusCode: 404))
             }
         }
 
-        router.post("/api/camera/stop") { _, _ -> CameraCaptureActionResponse in
-            await captureService.stop()
-            return CameraCaptureActionResponse(
-                ok: true,
-                error: nil,
-                capture: captureService.status()
-            )
-        }
-
-        router.get("/api/camera/frame.jpg") { _, _ -> Response in
-            guard let jpeg = captureService.previewJPEG() else {
-                return Response(status: .noContent)
-            }
-            return Response(
-                status: .ok,
-                headers: [.contentType: "image/jpeg"],
-                body: .init(byteBuffer: ByteBuffer(bytes: jpeg))
-            )
-        }
-
-        let app = Application(
-            router: router,
-            configuration: .init(address: .hostname(host, port: port))
-        )
-
-        try await app.runService()
+        server.start()
+        print("Packing Monitor \(serviceVersion) listening on http://\(host):\(port)")
+        dispatchMain()
     }
 }
