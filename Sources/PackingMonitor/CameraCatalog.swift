@@ -2,10 +2,6 @@ import AVFoundation
 import CoreMedia
 import Foundation
 
-/// Read-only AVFoundation camera diagnostics used by the first milestone.
-///
-/// Capture/recording is deliberately not started here. First we need to verify
-/// what the X-T2 / FUJIFILM X Webcam path actually exposes to AVFoundation.
 enum CameraCatalog {
     static func permissionStatus() -> String {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -22,26 +18,23 @@ enum CameraCatalog {
         }
     }
 
-    static func requestPermission() async -> Bool {
+    static func requestPermission(completion: @escaping (Bool) -> Void) {
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         switch status {
         case .authorized:
-            return true
+            completion(true)
         case .notDetermined:
-            return await AVCaptureDevice.requestAccess(for: .video)
+            AVCaptureDevice.requestAccess(for: .video) { granted in
+                completion(granted)
+            }
         case .denied, .restricted:
-            return false
+            completion(false)
         @unknown default:
-            return false
+            completion(false)
         }
     }
 
     static func videoDevices() -> [CameraInfo] {
-        // `devices(for:)` is deprecated in favor of DiscoverySession, but it is
-        // intentionally used in this diagnostic milestone because it returns all
-        // video devices, including virtual/external camera types that can vary by
-        // macOS/FUJIFILM driver version. We will narrow the discovery types after
-        // seeing the real X-T2 device classification.
         let devices = AVCaptureDevice.devices(for: .video)
 
         return devices
