@@ -7,6 +7,8 @@ let port = Int(environment["PACKING_MONITOR_PORT"] ?? "8787") ?? 8787
 let startedAt = Date()
 let serviceVersion = "0.3.0"
 let captureService = CameraCaptureService()
+let preferences = UserDefaults.standard
+let preferredCameraKey = "preferredCameraID"
 
 func dashboardURL(host: String, port: Int) -> String {
     let browserHost: String
@@ -24,6 +26,36 @@ func openDashboard(_ url: String) {
     opener.launchPath = "/usr/bin/open"
     opener.arguments = [url]
     opener.launch()
+}
+
+func startCamera(for request: HTTPRequest, completion: @escaping (Result<Void, Error>) -> Void) {
+    let devices = CameraCatalog.videoDevices()
+    let availableIDs = Set(devices.map { $0.id })
+
+    let requestedID = request.query["deviceID"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let savedID = preferences.string(forKey: preferredCameraKey)
+
+    let selectedID: String?
+    if let requestedID = requestedID, !requestedID.isEmpty, availableIDs.contains(requestedID) {
+        selectedID = requestedID
+    } else if let savedID = savedID, availableIDs.contains(savedID) {
+        selectedID = savedID
+    } else {
+        selectedID = nil
+    }
+
+    let finish: (Result<Void, Error>) -> Void = { result in
+        if case .success = result, let activeID = captureService.status().deviceID {
+            preferences.set(activeID, forKey: preferredCameraKey)
+        }
+        completion(result)
+    }
+
+    if let selectedID = selectedID {
+        captureService.start(deviceID: selectedID, completion: finish)
+    } else {
+        captureService.startPreferredCamera(completion: finish)
+    }
 }
 
 do {
@@ -47,7 +79,8 @@ do {
                 startedAt: startedAt,
                 uptimeSeconds: Date().timeIntervalSince(startedAt),
                 cameraPermission: CameraCatalog.permissionStatus(),
-                cameraCount: cameras.count
+                cameraCount: cameras.count,
+                preferredCameraID: preferences.string(forKey: preferredCameraKey)
             )))
 
         case ("GET", "/api/cameras"):
@@ -76,7 +109,7 @@ do {
             respond(.json(captureService.status()))
 
         case ("POST", "/api/camera/start"):
-            captureService.startPreferredCamera { result in
+            startCamera(for: request) { result in
                 switch result {
                 case .success:
                     respond(.json(CameraCaptureActionResponse(
