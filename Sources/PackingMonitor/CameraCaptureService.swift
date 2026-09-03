@@ -3,17 +3,20 @@ import CoreImage
 import CoreMedia
 import Foundation
 
-/// Owns the live AVFoundation capture session.
-///
-/// This implementation intentionally avoids Swift concurrency so it can be
-/// built with the Swift toolchain available on macOS Catalina/Xcode 12.
-final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+/// Owns the live AVFoundation capture session, lightweight browser preview,
+/// Vision recognition, and direct-to-NAS segmented recording.
+final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureFileOutputRecordingDelegate {
     private let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "packing-monitor.capture.session")
     private let sampleQueue = DispatchQueue(label: "packing-monitor.capture.samples")
     private let stateLock = NSLock()
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
     private let previewColorSpace = CGColorSpaceCreateDeviceRGB()
+    private let movieOutput = AVCaptureMovieFileOutput()
+
+    private let storage: StorageManager
+    private let eventStore: DetectionEventStore
+    private let recognitionEngine: LabelRecognitionEngine
 
     private var videoOutput: AVCaptureVideoDataOutput?
     private var runningState = false
@@ -25,10 +28,26 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
     private var lastFrameAt: Date?
     private var lastPreviewEncodedAt: TimeInterval = 0
 
-    /// 2 FPS is enough for camera alignment / ROI setup and avoids wasting CPU
-    /// on a browser preview while the native recording path stays full rate.
-    private let previewInterval: TimeInterval = 0.5
+    private var shouldContinueRecording = false
+    private var recordingState = false
+    private var currentRecordingPath: String?
+    private var currentSegmentStartedAt: Date?
+    private var lastRecordingError: String?
+
+    /// The browser preview is deliberately lower rate than the native capture
+    /// path. 8 FPS is smooth enough for setup while leaving CPU for Vision.
+    private let previewInterval: TimeInterval = 0.125
     private let previewMaxWidth: CGFloat = 960
+
+    init(storage: StorageManager, eventStore: DetectionEventStore) {
+        self.storage = storage
+        self.eventStore = eventStore
+        self.recognitionEngine = LabelRecognitionEngine()
+        super.init()
+        self.recognitionEngine.onConfirmed = { [weak self] hit in
+            self?.handleConfirmedRecognition(hit)
+        }
+    }
 
     func startPreferredCamera(completion: @escaping (Result<Void, Error>) -> Void) {
         guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
@@ -60,6 +79,11 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
                 return
             }
 
+            self.shouldContinueRecording = false
+            if self.movieOutput.isRecording {
+                self.movieOutput.stopRecording()
+            }
+
             if self.session.isRunning {
                 self.session.stopRunning()
             }
@@ -83,8 +107,12 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
             self.capturedHeight = 0
             self.lastFrameAt = nil
             self.lastPreviewEncodedAt = 0
+            self.recordingState = false
+            self.currentRecordingPath = nil
+            self.currentSegmentStartedAt = nil
             self.stateLock.unlock()
 
+            self.recognitionEngine.resetSession()
             completion?()
         }
     }
@@ -102,6 +130,45 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
         )
         stateLock.unlock()
         return response
+    }
+
+    func recognitionStatus() -> RecognitionStatusResponse {
+        return recognitionEngine.status()
+    }
+
+    func recordingStatus() -> RecordingStatusResponse {
+        stateLock.lock()
+        let recording = recordingState
+        let path = currentRecordingPath
+        let started = currentSegmentStartedAt
+        let error = lastRecordingError
+        stateLock.unlock()
+
+        let duration = started.map { max(0, Date().timeIntervalSince($0)) } ?? 0
+        return RecordingStatusResponse(
+            recording: recording,
+            currentPath: path,
+            segmentStartedAt: started,
+            segmentDurationSeconds: duration,
+            lastError: error
+        )
+    }
+
+    func refreshRecordingConfiguration() {
+        sessionQueue.async { [weak self] in
+            guard let self = self, self.session.isRunning else { return }
+            if self.storage.recordingEnabled {
+                self.shouldContinueRecording = true
+                if !self.movieOutput.isRecording {
+                    self.startNextRecordingSegment()
+                }
+            } else {
+                self.shouldContinueRecording = false
+                if self.movieOutput.isRecording {
+                    self.movieOutput.stopRecording()
+                }
+            }
+        }
     }
 
     func previewJPEG() -> Data? {
@@ -124,6 +191,10 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
                 return
             }
 
+            self.shouldContinueRecording = false
+            if self.movieOutput.isRecording {
+                self.movieOutput.stopRecording()
+            }
             if self.session.isRunning {
                 self.session.stopRunning()
             }
@@ -156,6 +227,11 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
                 self.session.addOutput(output)
                 self.videoOutput = output
 
+                guard self.session.canAddOutput(self.movieOutput) else {
+                    throw CameraCaptureError.cannotAddMovieOutput
+                }
+                self.session.addOutput(self.movieOutput)
+
                 self.session.commitConfiguration()
                 self.session.startRunning()
 
@@ -168,7 +244,18 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
                 self.capturedHeight = 0
                 self.lastFrameAt = nil
                 self.lastPreviewEncodedAt = 0
+                self.recordingState = false
+                self.currentRecordingPath = nil
+                self.currentSegmentStartedAt = nil
+                self.lastRecordingError = nil
                 self.stateLock.unlock()
+
+                self.recognitionEngine.resetSession()
+
+                if self.storage.recordingEnabled {
+                    self.shouldContinueRecording = true
+                    self.startNextRecordingSegment()
+                }
 
                 completion(.success(()))
             } catch {
@@ -181,10 +268,34 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
         }
     }
 
+    private func startNextRecordingSegment() {
+        guard session.isRunning, shouldContinueRecording, storage.recordingEnabled, !movieOutput.isRecording else { return }
+
+        do {
+            guard let url = try storage.nextRecordingURL() else {
+                shouldContinueRecording = false
+                return
+            }
+
+            movieOutput.maxRecordedDuration = CMTime(
+                seconds: Double(storage.segmentMinutes * 60),
+                preferredTimescale: 600
+            )
+            stateLock.lock()
+            lastRecordingError = nil
+            stateLock.unlock()
+            movieOutput.startRecording(to: url, recordingDelegate: self)
+        } catch {
+            stateLock.lock()
+            lastRecordingError = error.localizedDescription
+            recordingState = false
+            currentRecordingPath = nil
+            currentSegmentStartedAt = nil
+            stateLock.unlock()
+        }
+    }
+
     private func preferredDevice(from devices: [AVCaptureDevice]) -> AVCaptureDevice? {
-        // Prefer USB/HDMI capture devices for packing-monitor use. Virtual
-        // webcam drivers such as FUJIFILM X Webcam can remain installed but
-        // should not beat a real capture card when no saved selection exists.
         if let capture = devices.first(where: { device in
             let haystack = "\(device.localizedName) \(device.manufacturer) \(device.modelID)".lowercased()
             let looksLikeCapture = haystack.contains("capture") ||
@@ -241,6 +352,8 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
         }
         stateLock.unlock()
 
+        recognitionEngine.process(pixelBuffer: pixelBuffer, capturedAt: now)
+
         guard shouldEncodePreview else { return }
 
         let sourceImage = CIImage(cvPixelBuffer: pixelBuffer)
@@ -262,6 +375,78 @@ final class CameraCaptureService: NSObject, AVCaptureVideoDataOutputSampleBuffer
         latestPreviewJPEG = jpeg
         stateLock.unlock()
     }
+
+    func fileOutput(
+        _ output: AVCaptureFileOutput,
+        didStartRecordingTo fileURL: URL,
+        from connections: [AVCaptureConnection]
+    ) {
+        stateLock.lock()
+        recordingState = true
+        currentRecordingPath = fileURL.path
+        currentSegmentStartedAt = Date()
+        lastRecordingError = nil
+        stateLock.unlock()
+    }
+
+    func fileOutput(
+        _ output: AVCaptureFileOutput,
+        didFinishRecordingTo outputFileURL: URL,
+        from connections: [AVCaptureConnection],
+        error: Error?
+    ) {
+        let continueRecording = session.isRunning && shouldContinueRecording && storage.recordingEnabled
+
+        var benignDurationEnd = false
+        if let nsError = error as NSError? {
+            benignDurationEnd = nsError.domain == AVFoundationErrorDomain &&
+                nsError.code == AVError.Code.maximumDurationReached.rawValue
+        }
+
+        stateLock.lock()
+        recordingState = false
+        currentRecordingPath = nil
+        currentSegmentStartedAt = nil
+        if let error = error, !benignDurationEnd {
+            lastRecordingError = error.localizedDescription
+        }
+        stateLock.unlock()
+
+        if continueRecording {
+            sessionQueue.async { [weak self] in
+                self?.startNextRecordingSegment()
+            }
+        }
+    }
+
+    private func handleConfirmedRecognition(_ hit: RecognitionHit) {
+        if eventStore.hasRecentDuplicate(trackingNumber: hit.trackingNumber) {
+            return
+        }
+
+        stateLock.lock()
+        let deviceName = activeDeviceName
+        let videoPath = currentRecordingPath
+        let segmentStartedAt = currentSegmentStartedAt
+        stateLock.unlock()
+
+        let offset = segmentStartedAt.map { max(0, hit.detectedAt.timeIntervalSince($0)) }
+        let event = DetectionEvent(
+            id: UUID().uuidString,
+            trackingNumber: hit.trackingNumber,
+            rawValue: hit.rawValue,
+            source: hit.source,
+            symbology: hit.symbology,
+            confidence: hit.confidence,
+            detectedAt: hit.detectedAt,
+            boundingBox: hit.boundingBox,
+            deviceName: deviceName,
+            videoPath: videoPath,
+            segmentStartedAt: segmentStartedAt,
+            offsetSeconds: offset
+        )
+        _ = eventStore.record(event)
+    }
 }
 
 enum CameraCaptureError: LocalizedError {
@@ -269,6 +454,7 @@ enum CameraCaptureError: LocalizedError {
     case noVideoDevice
     case cannotAddInput
     case cannotAddOutput
+    case cannotAddMovieOutput
 
     var errorDescription: String? {
         switch self {
@@ -280,6 +466,8 @@ enum CameraCaptureError: LocalizedError {
             return "AVFoundation could not add the selected camera input."
         case .cannotAddOutput:
             return "AVFoundation could not add the video data output."
+        case .cannotAddMovieOutput:
+            return "AVFoundation could not add the movie recording output."
         }
     }
 }
