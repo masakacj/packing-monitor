@@ -98,6 +98,12 @@ struct StorageConfigActionResponse: Codable {
     let storage: StorageStatusResponse
 }
 
+struct StorageFolderSelectionResponse: Codable {
+    let ok: Bool
+    let path: String?
+    let error: String?
+}
+
 struct RecordingStatusResponse: Codable {
     let recording: Bool
     let currentPath: String?
