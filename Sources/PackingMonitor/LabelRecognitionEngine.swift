@@ -127,7 +127,9 @@ final class LabelRecognitionEngine {
                     guard let recognized = observation.topCandidates(1).first else { continue }
                     for code in trackingCandidates(from: recognized.string) {
                         let area = Double(observation.boundingBox.width * observation.boundingBox.height)
-                        let score = area * 50.0 + Double(code.count) + Double(recognized.confidence) * 20.0
+                        let digitCount = code.unicodeScalars.filter { $0.value >= 48 && $0.value <= 57 }.count
+                        let letterCount = code.count - digitCount
+                        let score = area * 50.0 + Double(digitCount * 2) + Double(letterCount) * 0.5 + Double(recognized.confidence) * 20.0
                         candidates.append(RecognitionCandidate(
                             trackingNumber: code,
                             rawValue: recognized.string,
@@ -201,14 +203,13 @@ final class LabelRecognitionEngine {
         return false
     }
 
+    /// OCR lines often contain labels such as "TRACKING NO 123...". Treating
+    /// the whole line as one token would incorrectly merge the words into the
+    /// tracking number, so OCR fallback only accepts contiguous alphanumeric
+    /// tokens. Barcode payloads still use the more permissive normalizer.
     private func trackingCandidates(from text: String) -> [String] {
         let upper = text.uppercased()
         var values: [String] = []
-
-        if let whole = normalizedTrackingNumber(upper) {
-            values.append(whole)
-        }
-
         let pieces = upper.components(separatedBy: CharacterSet.alphanumerics.inverted)
         for piece in pieces {
             if let value = normalizedTrackingNumber(piece), !values.contains(value) {
