@@ -19,7 +19,8 @@ let package = Package(
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("CoreImage"),
                 .linkedFramework("CoreMedia"),
-                .linkedFramework("Network")
+                .linkedFramework("Network"),
+                .linkedFramework("Vision")
             ]
         )
     ]
