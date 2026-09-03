@@ -66,6 +66,9 @@ final class LabelRecognitionEngine {
         }
     }
 
+    /// Returns true whenever a plausible barcode is visible, not only when it
+    /// emits a new event. This prevents expensive OCR work while a barcode is
+    /// already being tracked or duplicate-suppressed.
     @discardableResult
     private func recognizeBarcode(pixelBuffer: CVPixelBuffer, capturedAt: Date, uptime: TimeInterval) -> Bool {
         let request = VNDetectBarcodesRequest()
@@ -100,7 +103,8 @@ final class LabelRecognitionEngine {
             }
 
             guard let best = candidates.max(by: { $0.score < $1.score }) else { return false }
-            return consider(best, capturedAt: capturedAt, uptime: uptime)
+            _ = consider(best, capturedAt: capturedAt, uptime: uptime)
+            return true
         } catch {
             setError("Barcode Vision error: \(error.localizedDescription)")
             return false
