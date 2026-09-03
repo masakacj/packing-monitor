@@ -47,7 +47,7 @@ final class StorageManager {
             }
 
             do {
-                try prepareRoot(normalized)
+                try prepareRoot(normalized, verifyWrite: true)
             } catch {
                 return .failure(error)
             }
@@ -88,18 +88,14 @@ final class StorageManager {
         let fm = FileManager.default
         var isDirectory: ObjCBool = false
         let available = fm.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
-        var writable = false
-        var errorMessage: String?
-
-        if available {
-            do {
-                try verifyWritable(path)
-                writable = true
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-        } else {
+        let writable = available && fm.isWritableFile(atPath: path)
+        let errorMessage: String?
+        if !available {
             errorMessage = "NAS 路径当前不可用，请确认共享目录已经挂载"
+        } else if !writable {
+            errorMessage = "NAS 路径当前不可写"
+        } else {
+            errorMessage = nil
         }
 
         return StorageStatusResponse(
@@ -131,7 +127,7 @@ final class StorageManager {
 
     func nextRecordingURL(at date: Date = Date()) throws -> URL? {
         guard recordingEnabled, let root = rootPath else { return nil }
-        try prepareRoot(root)
+        try prepareRoot(root, verifyWrite: true)
 
         let dayFormatter = DateFormatter()
         dayFormatter.locale = Locale(identifier: "en_US_POSIX")
@@ -153,7 +149,7 @@ final class StorageManager {
 
     func indexURL() throws -> URL? {
         guard let root = rootPath else { return nil }
-        try prepareRoot(root)
+        try prepareRoot(root, verifyWrite: false)
         return URL(fileURLWithPath: root, isDirectory: true)
             .appendingPathComponent("index", isDirectory: true)
             .appendingPathComponent("events.jsonl", isDirectory: false)
@@ -167,7 +163,7 @@ final class StorageManager {
         return value
     }
 
-    private func prepareRoot(_ root: String) throws {
+    private func prepareRoot(_ root: String, verifyWrite: Bool) throws {
         guard root == "/Volumes" || root.hasPrefix("/Volumes/") else {
             throw StorageError.nasPathRequired
         }
@@ -187,7 +183,9 @@ final class StorageManager {
         try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true, attributes: nil)
         try FileManager.default.createDirectory(at: rootURL.appendingPathComponent("video", isDirectory: true), withIntermediateDirectories: true, attributes: nil)
         try FileManager.default.createDirectory(at: rootURL.appendingPathComponent("index", isDirectory: true), withIntermediateDirectories: true, attributes: nil)
-        try verifyWritable(root)
+        if verifyWrite {
+            try verifyWritable(root)
+        }
     }
 
     private func verifyWritable(_ root: String) throws {
