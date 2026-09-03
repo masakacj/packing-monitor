@@ -45,7 +45,7 @@ final class DetectionEventStore {
         guard !normalized.isEmpty else { return [] }
 
         return queue.sync {
-            guard let url = try? storage.indexURL(), let indexURL = url else { return [] }
+            guard let indexURL = try? storage.indexURL() else { return [] }
             guard let data = try? Data(contentsOf: indexURL), !data.isEmpty else { return [] }
             guard let text = String(data: data, encoding: .utf8) else { return [] }
 
@@ -67,7 +67,7 @@ final class DetectionEventStore {
 
     func recent(limit: Int = 20) -> [DetectionEvent] {
         return queue.sync {
-            guard let url = try? storage.indexURL(), let indexURL = url else { return [] }
+            guard let indexURL = try? storage.indexURL() else { return [] }
             guard let data = try? Data(contentsOf: indexURL), !data.isEmpty else { return [] }
             guard let text = String(data: data, encoding: .utf8) else { return [] }
 
@@ -84,7 +84,7 @@ final class DetectionEventStore {
 
     func event(id: String) -> DetectionEvent? {
         return queue.sync {
-            guard let url = try? storage.indexURL(), let indexURL = url else { return nil }
+            guard let indexURL = try? storage.indexURL() else { return nil }
             guard let data = try? Data(contentsOf: indexURL),
                   let text = String(data: data, encoding: .utf8)
             else { return nil }
