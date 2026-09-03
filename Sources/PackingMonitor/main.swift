@@ -5,7 +5,7 @@ let environment = ProcessInfo.processInfo.environment
 let host = environment["PACKING_MONITOR_HOST"] ?? "127.0.0.1"
 let port = Int(environment["PACKING_MONITOR_PORT"] ?? "8787") ?? 8787
 let startedAt = Date()
-let serviceVersion = "0.4.0"
+let serviceVersion = "0.4.2"
 let preferences = UserDefaults.standard
 let preferredCameraKey = "preferredCameraID"
 let storageManager = StorageManager(defaults: preferences)
@@ -30,6 +30,13 @@ func openDashboard(_ url: String) {
     opener.launch()
 }
 
+func enhancedMonitorDashboard() -> String {
+    let navigation = """
+    <a href="/manage" style="display:inline-block;margin-left:8px;padding:9px 12px;border:1px solid #343845;background:#20232b;color:#fff;border-radius:8px;text-decoration:none;font-size:13px">存储 / 运单查询</a>
+    """
+    return Dashboard.html.replacingOccurrences(of: "</header>", with: "\(navigation)</header>")
+}
+
 func revealInFinder(_ path: String) -> Result<Void, Error> {
     guard FileManager.default.fileExists(atPath: path) else {
         return .failure(AppActionError.fileNotFound)
@@ -39,6 +46,57 @@ func revealInFinder(_ path: String) -> Result<Void, Error> {
     opener.arguments = ["-R", path]
     opener.launch()
     return .success(())
+}
+
+func openFile(_ path: String) -> Result<Void, Error> {
+    guard FileManager.default.fileExists(atPath: path) else {
+        return .failure(AppActionError.fileNotFound)
+    }
+    let opener = Process()
+    opener.launchPath = "/usr/bin/open"
+    opener.arguments = [path]
+    opener.launch()
+    return .success(())
+}
+
+func chooseStorageFolder() -> Result<String, Error> {
+    let script = """
+    set pickedFolder to choose folder with prompt "选择 Packing Monitor 保存位置（请选择 NAS / 外接存储）"
+    POSIX path of pickedFolder
+    """
+
+    let picker = Process()
+    let outputPipe = Pipe()
+    let errorPipe = Pipe()
+    picker.launchPath = "/usr/bin/osascript"
+    picker.arguments = ["-e", script]
+    picker.standardOutput = outputPipe
+    picker.standardError = errorPipe
+
+    picker.launch()
+    picker.waitUntilExit()
+
+    if picker.terminationStatus != 0 {
+        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        let detail = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if detail.lowercased().contains("cancel") || detail.contains("-128") {
+            return .failure(AppActionError.folderSelectionCancelled)
+        }
+        return .failure(AppActionError.folderPickerFailed(detail))
+    }
+
+    let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+    guard var path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else {
+        return .failure(AppActionError.folderPickerFailed("未返回目录"))
+    }
+    while path.count > 1 && path.hasSuffix("/") {
+        path.removeLast()
+    }
+
+    guard path.hasPrefix("/Volumes/") else {
+        return .failure(AppActionError.storageFolderMustBeMountedVolume)
+    }
+    return .success(path)
 }
 
 func boolQuery(_ value: String?, default fallback: Bool) -> Bool {
@@ -84,7 +142,10 @@ do {
     let server = try HTTPServer(host: host, port: port) { request, respond in
         switch (request.method, request.path) {
         case ("GET", "/"):
-            respond(.text(Dashboard.html, contentType: "text/html; charset=utf-8"))
+            respond(.text(enhancedMonitorDashboard(), contentType: "text/html; charset=utf-8"))
+
+        case ("GET", "/manage"):
+            respond(.text(ManagementDashboard.html, contentType: "text/html; charset=utf-8"))
 
         case ("GET", "/api/health"):
             respond(.json(HealthResponse(
@@ -170,6 +231,14 @@ do {
         case ("GET", "/api/storage/status"):
             respond(.json(storageManager.status()))
 
+        case ("POST", "/api/storage/choose"):
+            switch chooseStorageFolder() {
+            case .success(let path):
+                respond(.json(StorageFolderSelectionResponse(ok: true, path: path, error: nil)))
+            case .failure(let error):
+                respond(.json(StorageFolderSelectionResponse(ok: false, path: nil, error: error.localizedDescription)))
+            }
+
         case ("POST", "/api/storage/config"):
             let current = storageManager.status()
             let rootPath = request.query["rootPath"] ?? current.rootPath ?? ""
@@ -224,6 +293,22 @@ do {
                 respond(.json(EventActionResponse(ok: false, error: error.localizedDescription), statusCode: 404))
             }
 
+        case ("POST", "/api/events/open"):
+            guard let id = request.query["id"], let event = eventStore.event(id: id) else {
+                respond(.json(EventActionResponse(ok: false, error: "未找到该识别记录"), statusCode: 404))
+                return
+            }
+            guard let path = event.videoPath else {
+                respond(.json(EventActionResponse(ok: false, error: "该记录没有关联录像文件"), statusCode: 404))
+                return
+            }
+            switch openFile(path) {
+            case .success:
+                respond(.json(EventActionResponse(ok: true, error: nil)))
+            case .failure(let error):
+                respond(.json(EventActionResponse(ok: false, error: error.localizedDescription), statusCode: 404))
+            }
+
         default:
             respond(.text("Not Found", statusCode: 404))
         }
@@ -245,11 +330,20 @@ do {
 
 enum AppActionError: LocalizedError {
     case fileNotFound
+    case folderSelectionCancelled
+    case storageFolderMustBeMountedVolume
+    case folderPickerFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .fileNotFound:
             return "录像文件不存在，可能是 NAS 未挂载或文件已移动"
+        case .folderSelectionCancelled:
+            return "已取消选择"
+        case .storageFolderMustBeMountedVolume:
+            return "保存位置必须位于 /Volumes 下的 NAS 或外接存储"
+        case .folderPickerFailed(let detail):
+            return detail.isEmpty ? "无法打开目录选择器" : "目录选择失败：\(detail)"
         }
     }
 }
